@@ -3,6 +3,7 @@ import httpStatusCodes from "../utils/httpStatusCodes.js";
 import User from "../models/user.model.js";
 import Role from "../models/role.model.js";
 import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
 import { generateSecurePassword } from "../utils/generatePassword.js";
 import transporter from "../config/mailConfig.js";
 const saltRounds = 10;
@@ -70,6 +71,159 @@ class AuthController {
     } catch (error) {
       logger.error(error.message);
       res.status(httpStatusCodes.INTERNAL_SERVER_ERROR).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+
+  async login(req, res) {
+    try {
+      const { email, password } = req.body;
+      if (!email || !password) {
+        return res.status(httpStatusCodes.BAD_REQUEST).json({
+          success: false,
+          message: "Required fields are missing.",
+        });
+      }
+
+      const existingUser = await User.findOne({ email });
+      if (!existingUser) {
+        return res.status(httpStatusCodes.NOT_FOUND).json({
+          success: false,
+          message: "User with this email not found.",
+        });
+      }
+
+      const isPasswordMatch = await bcrypt.compare(
+        password,
+        existingUser.password,
+      );
+      if (!isPasswordMatch) {
+        return res.status(httpStatusCodes.BAD_REQUEST).json({
+          success: false,
+          message: "Invalid Credentials",
+        });
+      }
+
+      const jwtPayload = {
+        id: existingUser._id,
+        name: existingUser.name,
+        email: existingUser.email,
+        role: existingUser.role,
+      };
+
+      const accessToken = jwt.sign(jwtPayload, process.env.JWT_SECRET, {
+        expiresIn: "1h",
+      });
+
+      const refreshToken = jwt.sign(
+        jwtPayload,
+        process.env.JWT_REFRESH_SECRET,
+        {
+          expiresIn: "1d",
+        },
+      );
+
+      if (!accessToken) {
+        return res.status(httpStatusCodes.BAD_REQUEST).json({
+          success: false,
+          message: "Access token not created",
+        });
+      } else if (!refreshToken) {
+        return res.status(httpStatusCodes.BAD_REQUEST).json({
+          success: false,
+          message: "Refresh token not created",
+        });
+      }
+
+      const hashedRefreshToken = await bcrypt.hash(refreshToken, saltRounds);
+      existingUser.refreshToken = hashedRefreshToken;
+      await existingUser.save();
+
+      await existingUser.populate({
+        path: "role",
+        populate: { path: "permissions" },
+      });
+
+      return res.status(httpStatusCodes.CREATED).json({
+        success: true,
+        message: "User logged in successfully",
+        data: {
+          id: existingUser._id,
+          name: existingUser.name,
+          email: existingUser.email,
+          role: existingUser.role,
+          accessToken,
+          refreshToken,
+        },
+      });
+    } catch (error) {
+      logger.error(error.message);
+      return res.status(httpStatusCodes.INTERNAL_SERVER_ERROR).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+
+  async refreshToken(req, res) {
+    try {
+      const { refreshToken } = req.headers["refresh-token"];
+      if (!refreshToken) {
+        return res.status(httpStatusCodes.UNAUTHORIZED).json({
+          success: false,
+          message: "Refresh token not provided.",
+        });
+      }
+      const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+
+      const user = await User.findById(decoded.id).populate("role");
+      if (!user || !user.refreshToken) {
+        return res.status(httpStatusCodes.UNAUTHORIZED).json({
+          success: false,
+          message: "Invalid token or session expired.",
+        });
+      }
+
+      const isMatch = await bcrypt.compare(decoded, user.refreshToken);
+      if (!isMatch) {
+        return res.status(httpStatusCodes.UNAUTHORIZED).json({
+          success: false,
+          message: "Token reused or invalid. Log in again.",
+        });
+      }
+
+      const payload = {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role?.name,
+      };
+
+      const newAccessToken = jwt.sign(payload, process.env.JWT_SECRET, {
+        expiresIn: "1h",
+      });
+      const newRefreshToken = jwt.sign(
+        payload,
+        process.env.JWT_REFRESH_SECRET,
+        { expiresIn: "1d" },
+      );
+
+      user.refreshToken = await bcrypt.hash(newRefreshToken, saltRounds);
+      await user.save();
+
+      return res.status(httpStatusCodes.OK).json({
+        success: true,
+        message: "Refresh token generated.",
+        data: {
+          accessToken: newAccessToken,
+          refreshToken: newRefreshToken,
+        },
+      });
+    } catch (error) {
+      logger.error(error.message);
+      return res.status(httpStatusCodes.error).json({
         success: false,
         message: error.message,
       });
