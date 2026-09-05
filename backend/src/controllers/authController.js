@@ -3,6 +3,7 @@ import httpStatusCodes from "../utils/httpStatusCodes.js";
 import User from "../models/user.model.js";
 import Role from "../models/role.model.js";
 import bcrypt from "bcrypt";
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { generateSecurePassword } from "../utils/generatePassword.js";
 import transporter from "../config/mailConfig.js";
@@ -169,7 +170,7 @@ class AuthController {
 
   async refreshToken(req, res) {
     try {
-      const { refreshToken } = req.headers["refresh-token"];
+      const refreshToken = req.headers["refresh-token"];
       if (!refreshToken) {
         return res.status(httpStatusCodes.UNAUTHORIZED).json({
           success: false,
@@ -186,7 +187,7 @@ class AuthController {
         });
       }
 
-      const isMatch = await bcrypt.compare(decoded, user.refreshToken);
+      const isMatch = await bcrypt.compare(refreshToken, user.refreshToken);
       if (!isMatch) {
         return res.status(httpStatusCodes.UNAUTHORIZED).json({
           success: false,
@@ -223,7 +224,56 @@ class AuthController {
       });
     } catch (error) {
       logger.error(error.message);
-      return res.status(httpStatusCodes.error).json({
+      return res.status(httpStatusCodes.INTERNAL_SERVER_ERROR).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+
+  async forgotPassword(req, res) {
+    try {
+      const { email } = req.body;
+      if (!email) {
+        return res.status(httpStatusCodes.NOT_FOUND).json({
+          success: false,
+          message: "Email is required.",
+        });
+      }
+
+      const user = await User.findOne({ email });
+      if (!user) {
+        return res.status(httpStatusCodes.NOT_FOUND).json({
+          success: false,
+          message: "If user exists, reset link has been sent to the email.",
+        });
+      }
+
+      const resetToken = crypto.randomBytes(32).toString("hex");
+      user.resetToken = resetToken;
+      user.resetTokenExpiryTime = Date.now() + 15 * 60 * 1000;
+      await user.save();
+
+      const resetUrl = `${process.env.FRONTEND_BASE_URL}/reset-password?token=${resetToken}`;
+
+      try {
+        await transporter.sendMail({
+          from: process.env.EMAIL_FROM,
+          to: email,
+          subject: "Reset Password",
+          html: `<p>This is your reset password link: ${resetUrl}</p>`,
+        });
+      } catch (mailError) {
+        logger.error(mailError.message);
+      }
+
+      return res.status(httpStatusCodes.OK).json({
+        success:true,
+        message: "Email has been sent with the reset link."
+      })
+    } catch (error) {
+      logger.error(error.message);
+      return res.status(httpStatusCodes.INTERNAL_SERVER_ERROR).json({
         success: false,
         message: error.message,
       });
